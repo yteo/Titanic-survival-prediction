@@ -1,11 +1,3 @@
----
-title: "Titanic survival prediction from Kaggle"
-output: 
-  html_document:
-    keep_md: true
----
-
-
 
 ```r
 library(ggplot2)
