@@ -1,0 +1,225 @@
+---
+title: "Titanic survival prediction from Kaggle"
+output: 
+  html_document:
+    keep_md: true
+---
+
+
+```{r , echo=T, message=F, warning=F}
+library(ggplot2)
+library(GGally)
+library(randomForest)
+library(mice)
+library(dplyr)
+
+train<-read.csv("train.csv")
+test<-read.csv("test.csv")
+test$Survived<-NA
+```
+
+Combine training and test set, add features and look at missing data
+```{r, echo=T, message=F, warning=F}
+all<-rbind(train,test)
+
+# creating a feature with the total number of passengers in a family
+all$FamSize<-all$SibSp+all$Parch+1
+
+
+# creating a title/suffix feature from the name list
+all$Title<-gsub("(\\..*)|(.*,)","",all$Name)
+
+all<-all %>% mutate_if(is.character, as.factor)
+
+# replace missing data with NA
+all<-data.frame(apply(all,2,function(x) gsub("^$",NA,x)))
+
+all[,c("SibSp","Parch","Age","Fare","FamSize")]<-apply(all[c("SibSp","Parch","Age","Fare","FamSize")],2,function(x) as.numeric(x))
+
+# look at missing data
+md.pattern(all)
+```
+Maybe we can do something with the last name, but I'll stick with just the family size 
+263 missing values in Age, 2 missing values in Embarked, 1 missing value in Fare, 1014 missing values in Cabin
+77% missing data for cabin  (will try the model with and without cabin later)
+
+imputing missing data using mice
+
+```{r,echo=T, message=F, warning=F}
+imputed_all <- mice(all[,colnames(all)%in%c("Pclass","Sex","SibSp","Parch","Fare","Age","Embarked","title")], m=1, seed = 131)
+imputed_all<- complete(imputed_all)
+```
+
+just want to check the imputed missing data to see if I should just keep the ones from mice package.
+```{r, echo=T, message=F, warning=F}
+# Age
+ggplot()+geom_histogram(data=all,aes(x=Age),bins=50)+theme_bw()
+ggplot()+geom_histogram(data=imputed_all,aes(x=Age),bins=50)+theme_bw()
+
+all$Age<-imputed_all$Age
+
+# Fare
+imputed_all[is.na(all$Fare),]
+all[is.na(all$Fare),]
+
+# it is replaced with 7.75
+C3ES<-train[(train$Pclass=="3") & (train$Embarked=="S"),]
+
+ggplot()+geom_histogram(data=C3ES,aes(x=Fare),bins=100)+theme_bw()
+median(C3ES$Fare)
+names(sort(-table(C3ES$Fare)))[1]
+# it seems more reasonable with 8.05 based on the plot. So I'll reassign that
+all[which(is.na(all$Fare)),]$Fare<-as.numeric("8.05")
+
+
+
+# embarkation
+imputed_all[is.na(all$Embarked),]
+all[is.na(all$Embarked),]
+```
+Passenger 62 and 830 have the same ticket number, but the imputed embarkation is at different places (S and C, respectively)
+
+They were in the first class, paid 80 for the ticket each. We could impute it based on the most frequent embarkation or based on the fare they paid in the first class.
+
+```{r,echo =F, message=F, warning=F}
+first<-all[grep("1",all$Pclass),]
+ggplot()+geom_boxplot(data=first,aes(x=Embarked,y=Fare))+theme_bw()+ggtitle("Embarkation based on fare in the first class")
+
+table(all$Embarked,all$Pclass)
+```
+
+It seems like the missing embarkations are more likely to be C based on the fare in first class (Q the least frequent). 
+p/s: Apparently, the information is available online, the two of them embarked at Southampton.I would have actually gone with C instead. I'll just do it and see how that performs. 
+```{r,echo=T, message=F, warning=F}
+all[which(is.na(all$Embarked)),]$Embarked<-"C"
+```
+
+Many missing values in Cabin.
+I will just ignore the cabin number and go with the deck (level), Fill in the missing cabin values with NC (no cabin)
+```{r,echo=T, message=F, warning=F}
+all$Cabin2<-gsub("[0-9].*","",all$Cabin)
+all[is.na(all$Cabin2),]$Cabin2<-"NC"
+table(all$Cabin2,all$Survived)
+all[all$Cabin2=="F E",]$Cabin2<-as.character("E")
+all[all$Cabin2=="F G",]$Cabin2<-as.character("G")
+all<-all %>% mutate_if(is.character, as.factor)
+```
+
+making sure no more missing data (not gonna use the Cabin column) 
+```{r,echo=T, message=F, warning=F}
+md.pattern(all[,-which(names(all) %in% "Cabin")])
+```
+
+Exploring the data
+```{r,echo=T, message=F, warning=F}
+all$AgeGroup<-findInterval(all$Age,c(10,20,30,40,50,60))
+ggplot()+geom_bar(data=all[1:891,],aes(x=AgeGroup,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Age")
+```
+
+Passengers in the 20s and over 60s are most likely to not surive. Children < 10 survived the most. 
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_bar(data=all[1:891,],aes(x=Pclass,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Pclass")
+```
+
+Pclass 1 is most likely to survive
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_bar(data=all[1:891,],aes(x=Sex,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Sex")
+```
+
+Female is more likely to survive
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_bar(data=all[1:891,],aes(x=SibSp,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Number of sibling and spouses onboard")
+ggplot()+geom_bar(data=all[1:891,],aes(x=Parch,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Number of parents and children onboard")
+ggplot()+geom_bar(data=all[1:891,],aes(x=FamSize,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and total number of family")
+```
+
+Middle size family seems to be most likely to survive.
+
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_boxplot(data=all[1:891,],aes(y=Fare,x=factor(Survived)))+theme_bw()+ggtitle("Survival and Fare")
+
+```
+
+The higher the fare one paid, the more likely he/she survived. 
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_bar(data=all[1:891,],aes(x=Cabin2,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and cabin")
+
+```
+
+I was expecting more survival from cabin A, but we can see that G has very low survival rate. I will try the model with or without cabin level.
+
+```{r,echo=T, message=F, warning=F}
+
+ggplot()+geom_bar(data=all[1:891,],aes(x=Embarked,fill=factor(Survived)),position="fill")+theme_bw()+ggtitle("Survival and Embarkation")
+
+```
+
+
+
+````{r,echo=T, message=F, warning=F}
+# include cabin level, and numerical age
+set.seed(131)
+titanic1.rf<-randomForest(factor(Survived)~Pclass+Sex+Age+SibSp+Parch+Fare+Cabin2+FamSize+Title+Embarked,data=all[1:891,])
+
+varImpPlot(titanic1.rf)
+
+print(titanic1.rf) 
+
+```
+
+
+
+
+````{r,echo=T, message=F, warning=F}
+# include cabin level, and Age GROUP
+set.seed(131)
+titanic2.rf<-randomForest(factor(Survived)~Pclass+Sex+AgeGroup+SibSp+Parch+Fare+Cabin2+FamSize+Title+Embarked,data=all[1:891,])
+varImpPlot(titanic2.rf)
+
+print(titanic2.rf) 
+
+```
+
+Did worse by grouping age
+````{r,echo=T, message=F, warning=F}
+# Exclude cabin level, and include numerical age
+set.seed(131)
+titanic3.rf<-randomForest(factor(Survived)~Pclass+Sex+Age+SibSp+Parch+Fare+FamSize+Title+Embarked,data=all[1:891,])
+varImpPlot(titanic3.rf)
+
+print(titanic3.rf) 
+
+```
+ worse without cabin!
+ 
+ 
+````{r,echo=T, message=F, warning=F}
+# Exclude cabin level, and include age group
+set.seed(131)
+titanic4.rf<-randomForest(factor(Survived)~Pclass+Sex+AgeGroup+SibSp+Parch+Fare+FamSize+Title+Embarked,data=all[1:891,])
+varImpPlot(titanic4.rf)
+
+print(titanic4.rf) 
+
+```
+Comparable to the first one, better in predicting death (titanic1 is better in predicting survival)
+
+I'll stick to the first one
+```{r,echo=T, message=F, warning=F}
+pred<-predict(titanic1.rf,newdata=all[892:1309,])
+
+dat<-data.frame(PassengerId=all[892:1309,]$PassengerId,Survived=pred)
+write.csv(dat,file="titanic_survival.csv",row.names = F)
+```
+
+Submitted, got a score of 0.76076
